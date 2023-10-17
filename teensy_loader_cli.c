@@ -37,7 +37,8 @@ void usage(const char *err)
 {
 	if(err != NULL) fprintf(stderr, "%s\n\n", err);
 	fprintf(stderr,
-		"Usage: teensy_loader_cli --mcu=<MCU> [-w] [-h] [-n] [-b] [-v] <file.hex>\n"
+		"Usage: teensy_loader_cli --mcu=<MCU> [--devnum=<usb device>] [-w] [-h] [-n] [-b] [-v] <file.hex>\n"
+		"\t--devnum : Target usb device. Can be found with `lsusb` (optional) \n"
 		"\t-w : Wait for device to appear\n"
 		"\t-r : Use hard reboot if device not online\n"
 		"\t-s : Use soft reboot if device not online (Teensy 3.x & 4.x)\n"
@@ -79,7 +80,7 @@ int verbose = 0;
 int boot_only = 0;
 int code_size = 0, block_size = 0;
 const char *filename=NULL;
-
+int target_devnum = -1;
 
 /****************************************************************/
 /*                                                              */
@@ -227,7 +228,7 @@ int main(int argc, char **argv)
 // http://libusb.sourceforge.net/doc/index.html
 #include <usb.h>
 
-usb_dev_handle * open_usb_device(int vid, int pid)
+usb_dev_handle * open_usb_device(int vid, int pid, int devnum)
 {
 	struct usb_bus *bus;
 	struct usb_device *dev;
@@ -241,13 +242,23 @@ usb_dev_handle * open_usb_device(int vid, int pid)
 	//printf_verbose("\nSearching for USB device:\n");
 	for (bus = usb_get_busses(); bus; bus = bus->next) {
 		for (dev = bus->devices; dev; dev = dev->next) {
-			//printf_verbose("bus \"%s\", device \"%s\" vid=%04X, pid=%04X\n",
-			//	bus->dirname, dev->filename,
-			//	dev->descriptor.idVendor,
-			//	dev->descriptor.idProduct
-			//);
-			if (dev->descriptor.idVendor != vid) continue;
+
+            // find teensy
+            if (dev->descriptor.idVendor != vid) continue;
 			if (dev->descriptor.idProduct != pid) continue;
+
+            if (devnum != -1) {
+                if(dev->devnum != devnum) continue;
+            }
+
+			printf_verbose("bus \"%s\", device \"%s\" vid=%04X, pid=%04X, serial=%d, devnum=%d\n",
+			    bus->dirname, dev->filename,
+			    dev->descriptor.idVendor,
+				dev->descriptor.idProduct,
+				dev->descriptor.iSerialNumber,
+				dev->devnum
+			);
+
 			h = usb_open(dev);
 			if (!h) {
 				printf_verbose("Found device but unable to open\n");
@@ -276,6 +287,18 @@ usb_dev_handle * open_usb_device(int vid, int pid)
 			}
 			#endif
 
+            /*
+            if(sn != NULL) {
+                char* curr_sn[32];
+                usb_get_string_simple(h, dev->descriptor.iSerialNumber, curr_sn, 24);
+                if(strcmp(sn, curr_sn) != 0) {
+                    usb_close(h);
+                    printf_verbose("Serial number does not match (%s != %s)\n", sn, curr_sn);
+                    continue;
+                }
+            }
+            */
+
 			return h;
 		}
 	}
@@ -287,7 +310,7 @@ static usb_dev_handle *libusb_teensy_handle = NULL;
 int teensy_open(void)
 {
 	teensy_close();
-	libusb_teensy_handle = open_usb_device(0x16C0, 0x0478);
+	libusb_teensy_handle = open_usb_device(0x16C0, 0x0478, -1);
 	if (libusb_teensy_handle) return 1;
 	return 0;
 }
@@ -321,7 +344,7 @@ int hard_reboot(void)
 	usb_dev_handle *rebootor;
 	int r;
 
-	rebootor = open_usb_device(0x16C0, 0x0477);
+	rebootor = open_usb_device(0x16C0, 0x0477, -1);
 	if (!rebootor) return 0;
 	r = usb_control_msg(rebootor, 0x21, 9, 0x0200, 0, "reboot", 6, 100);
 	usb_release_interface(rebootor, 0);
@@ -334,7 +357,8 @@ int soft_reboot(void)
 {
 	usb_dev_handle *serial_handle = NULL;
 
-	serial_handle = open_usb_device(0x16C0, 0x0483);
+    // target_devnum++;
+	serial_handle = open_usb_device(0x16C0, 0x0483, target_devnum);
 	if (!serial_handle) {
 		char *error = usb_strerror();
 		printf("Error opening USB device: %s\n", error);
@@ -784,7 +808,7 @@ static int uhid_teensy_fd = -1;
 int teensy_open(void)
 {
 	teensy_close();
-	uhid_teensy_fd = open_usb_device(0x16C0, 0x0478);
+	uhid_teensy_fd = open_usb_device(0x16C0, 0x0478, target_devnum);
 	if (uhid_teensy_fd < 0) return 0;
 	return 1;
 }
@@ -811,7 +835,7 @@ int hard_reboot(void)
 {
 	int r, rebootor_fd;
 
-	rebootor_fd = open_usb_device(0x16C0, 0x0477);
+	rebootor_fd = open_usb_device(0x16C0, 0x0477, target_devnum);
 	if (rebootor_fd < 0) return 0;
 	r = write(rebootor_fd, "reboot", 6);
 	delay(0.1);
@@ -1119,7 +1143,6 @@ void read_mcu(char *name)
 	list_mcus();
 }
 
-
 void parse_flag(char *arg)
 {
 	int i;
@@ -1168,6 +1191,8 @@ void parse_options(int argc, char **argv)
 
 				if(strcasecmp(name, "help") == 0) usage(NULL);
 				else if(strcasecmp(name, "mcu") == 0) read_mcu(val);
+				else if(strcasecmp(name, "devnum") == 0) target_devnum = atoi(val);
+				//else if(strcasecmp(name, "sn") == 0) serial_identifier = val;
 				else if(strcasecmp(name, "list-mcus") == 0) list_mcus();
 				else {
 					fprintf(stderr, "Unknown option \"%s\"\n\n", arg);
